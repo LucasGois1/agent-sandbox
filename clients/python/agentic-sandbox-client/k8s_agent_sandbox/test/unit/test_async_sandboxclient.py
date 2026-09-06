@@ -270,6 +270,27 @@ class TestAsyncSandboxClient(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(sandbox, self.mock_sandbox_class.return_value)
 
+    async def test_create_sandbox_reports_claim_deleted_after_adoption_conflict(self):
+        self.mock_k8s_helper.create_sandbox_claim = AsyncMock(
+            side_effect=ApiException(status=409)
+        )
+        self.mock_k8s_helper.get_sandbox_claim = AsyncMock(return_value=None)
+        self.mock_k8s_helper.wait_for_claim_ready = AsyncMock()
+        self.mock_k8s_helper.delete_sandbox_claim = AsyncMock()
+
+        with self.assertRaisesRegex(
+            SandboxNotFoundError, "disappeared after the create conflict"
+        ):
+            await self.client.create_sandbox(
+                WARMPOOL,
+                NAMESPACE,
+                claim_name=CLAIM_NAME,
+                adopt_existing=True,
+            )
+
+        self.mock_k8s_helper.wait_for_claim_ready.assert_not_awaited()
+        self.mock_k8s_helper.delete_sandbox_claim.assert_not_awaited()
+
     async def test_create_sandbox_propagates_conflict_without_adoption(self):
         conflict = ApiException(status=409)
         self.mock_k8s_helper.create_sandbox_claim = AsyncMock(

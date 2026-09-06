@@ -221,6 +221,11 @@ class SandboxClient(Generic[T]):
                 existing_claim = self.k8s_helper.get_sandbox_claim(
                     claim_name, namespace
                 )
+                if existing_claim is None:
+                    raise SandboxNotFoundError(
+                        f"SandboxClaim '{claim_name}' disappeared after the "
+                        "create conflict; retry the request."
+                    )
                 claim_identity = validate_expected_claim(existing_claim)
                 claim_rv = claim_identity.resource_version
                 claim_validator = partial(
