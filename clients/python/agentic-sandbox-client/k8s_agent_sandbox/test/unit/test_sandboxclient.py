@@ -1277,7 +1277,7 @@ class TestRequestExceptions(unittest.TestCase):
         cls.server.server_close()
         cls.server_thread.join(timeout=5)
 
-    def _make_connector(self) -> SandboxConnector:
+    def _make_connector(self, use_default_retries=False) -> SandboxConnector:
         """Creates a SandboxConnector pointing at the local test server."""
         config = SandboxDirectConnectionConfig(
             api_url=f"http://127.0.0.1:{self.port}",
@@ -1290,9 +1290,63 @@ class TestRequestExceptions(unittest.TestCase):
             connection_config=config,
             k8s_helper=k8s_helper,
         )
-        adapter = HTTPAdapter(max_retries=Retry(total=0))
-        connector.session.mount("http://", adapter)
+        if not use_default_retries:
+            adapter = HTTPAdapter(max_retries=Retry(total=0))
+            connector.session.mount("http://", adapter)
         return connector
+
+    def test_post_server_error_does_not_repeat_the_request(self):
+        connector = self._make_connector(use_default_retries=True)
+        received_paths = []
+        original_handler = SandboxHandler.do_POST
+
+        def record_request(handler):
+            received_paths.append(handler.path)
+            original_handler(handler)
+
+        with patch.object(SandboxHandler, "do_POST", record_request), patch(
+            "urllib3.util.retry.time.sleep"
+        ):
+            with self.assertRaises(SandboxRequestError):
+                connector.send_request("POST", "run-shutdown")
+
+        self.assertEqual(received_paths, ["/run-shutdown"])
+
+    def test_post_lost_response_does_not_repeat_the_request(self):
+        connector = self._make_connector(use_default_retries=True)
+        received_paths = []
+
+        def lose_response(handler):
+            handler.rfile.read(int(handler.headers["Content-Length"]))
+            received_paths.append(handler.path)
+            handler.close_connection = True
+
+        with patch.object(SandboxHandler, "do_POST", lose_response), patch(
+            "urllib3.util.retry.time.sleep"
+        ):
+            with self.assertRaises(SandboxRequestError):
+                connector.send_request("POST", "execute", json={"command": "test"})
+
+        self.assertEqual(received_paths, ["/execute"])
+
+    def test_idempotent_methods_retry_server_errors(self):
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                connector = self._make_connector(use_default_retries=True)
+                received_methods = []
+
+                def respond(handler):
+                    received_methods.append(handler.command)
+                    status = HTTPStatus.SERVICE_UNAVAILABLE if len(received_methods) == 1 else HTTPStatus.OK
+                    handler._respond(status, {"status": "ok"})
+
+                with patch.object(SandboxHandler, f"do_{method}", respond, create=True), patch(
+                    "urllib3.util.retry.time.sleep"
+                ):
+                    response = connector.send_request(method, "health")
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(received_methods, [method, method])
 
     def test_run_accepted(self):
         """POST /run returns 202."""

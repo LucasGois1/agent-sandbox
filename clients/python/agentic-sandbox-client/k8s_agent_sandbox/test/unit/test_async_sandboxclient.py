@@ -1652,6 +1652,48 @@ class TestAsyncConnectorHTTP(unittest.IsolatedAsyncioTestCase):
             k8s_helper=k8s_helper,
         )
 
+    async def test_post_server_error_does_not_repeat_the_request(self):
+        connector = self._make_connector()
+        received_paths = []
+        original_handler = AsyncSandboxHandler.do_POST
+
+        def record_request(handler):
+            received_paths.append(handler.path)
+            original_handler(handler)
+
+        try:
+            with patch.object(AsyncSandboxHandler, "do_POST", record_request), patch(
+                "k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()
+            ):
+                with self.assertRaises(SandboxRequestError):
+                    await connector.send_request("POST", "server-error")
+
+            self.assertEqual(received_paths, ["/server-error"])
+        finally:
+            await connector.close()
+
+    async def test_idempotent_methods_retry_server_errors(self):
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method=method):
+                connector = self._make_connector()
+                received_methods = []
+
+                def respond(handler):
+                    received_methods.append(handler.command)
+                    status = HTTPStatus.SERVICE_UNAVAILABLE if len(received_methods) == 1 else HTTPStatus.OK
+                    handler._respond(status, {"status": "ok"})
+
+                try:
+                    with patch.object(AsyncSandboxHandler, f"do_{method}", respond, create=True), patch(
+                        "k8s_agent_sandbox.async_connector.asyncio.sleep", new=AsyncMock()
+                    ):
+                        response = await connector.send_request(method, "health")
+
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(received_methods, [method, method])
+                finally:
+                    await connector.close()
+
     async def test_successful_request(self):
         connector = self._make_connector()
         try:
